@@ -1,0 +1,110 @@
+# 1 - SEX: Checks for discrepancies between sex of the individuals recorded in the dataset and their sex based on X chromosome.
+Males only have one copy of the X-chromosome. Thus, they cannot be heterozygous for any marker not in the pseudo-autosomal region of the Y chromosome.
+Males should have an X chromosome homozygosity estimate >0.8 and females should have a value <0.2. 
+
+## PLINK
+plink --bfile DB_A_updated --update-sex Sex.txt --make-bed  --out DB_A_v0
+plink --bfile DB_A_v0 --set-hh-missing --make-bed --out DB_A_v1
+plink --bfile DB_A_v1 --check-sex --out results_checksex
+
+One of the most frequently used practices is to eliminate individuals with a sex discrepancy. 
+
+## Rstudio
+library(readr)
+results_checksex <- read_table("results_checksex.sexcheck")
+View(results_checksex)
+write.table(as.data.frame(select(filter(results_checksex, STATUS == "PROBLEM"),c(1,2))),"sex-discrepancy.txt",sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+## PLINK
+plink  --bfile DB_A_v1 --remove sex-discrepancy.txt  --make-bed --out DB_A_v2
+---
+
+# 2 - CHROMOSOME SELECTION: To generate a file with autosomal and X chromosome only (1-23).
+N.B. in plink the X chromosome is identified as 23.
+
+## PLINK
+plink --bfile DB_A_v2 --chr  1-23 --make-bed --out DB_A_v3
+---
+
+# 3 - MAF: Includes only SNPs above the set MAF threshold.
+SNPs with a low MAF are rare, these SNPs are also more prone to genotyping errors.
+The MAF threshold should depend on your sample size, larger samples can use lower MAF thresholds.
+
+## PLINK
+plink --bfile DB_A_v3 --maf 0.01 --write-snplist --make-bed  --out DB_A_v4
+
+In this case, SNPs with a MAF<0.01 were excluded.
+---
+
+# 4 - CALL RATE/GENO: Excludes SNPs that are missing in a large proportion of the subjects. In this step, SNPs with low genotype calls are removed.
+
+## PLINK
+plink --bfile DB_A_v4 --geno 0.05 --write-snplist --make-bed --out DB_A_v5
+ ---
+
+# 5 - CALL RATE/MIND: Excludes individuals who have high rates of genotype missingness. In this step, individuals with low genotype calls are removed.
+
+## PLINK
+plink --bfile DB_A_v5 --mind 0.10 --make-bed  --out DB_A_v6
+---
+
+# 6 - HETEROZYGOSITY: Excludes individuals with high or low heterozygosity rates.
+Excess genome-wide heterozygosity is a very good indicator of poor DNA quality and/or sample contamination.
+On the other hand, excess genome-wide homozygosity may indicate some degree of inbreeding. Deviations can indicate sample contamination, inbreeding.
+
+## PLINK
+plink --bfile DB_A_v6 --het --out heterozygosity
+
+This will generate the .het file, which contains F coefficient estimates for assessing heterozygosity.
+
+| FID | IID | O(HOM)| E(HOM) | N(NM) | F |
+|-----|-----|-------|--------|-------|---|
+
+The estimate of F can sometimes be negative. Often this will just reflect random sampling error, but a result that is strongly negative
+  (i.e. an individual has fewer homozygotes than one would expect by chance at the genome-wide level) can reflect other factors, e.g. sample contamination events perhaps.
+Removal of individuals with F coefficients that are more than 3 standard deviation (SD) units from the mean can be performed in R:
+
+## Rstudio
+library(readr)
+heterozygosity <- read_table("heterozygosity.het")
+View(heterozygosity)
+
+dat <- read.table("heterozygosity.het", header=T) 
+m <- mean(dat$F) 
+s <- sd(dat$F) 
+valid <- subset(dat, F <= m+3*s & F >= m-3*s)
+write.table(valid[,c(1,2)], paste( "DB_valid_sample.txt", sep=""), quote=F, row.names=F)
+
+And then keep individuals with good heterozygosity rate.
+
+## PLINK
+plink --bfile DB_A_v6 --keep DB_valid_sample.txt --make-bed --out DB_A_v7
+---
+
+7 - RELATEDNESS: Cryptic relatedness can interfere with the association analysis.
+The degree of relatedness between samples can be estimated by calculating genome-wide IBD given identity-by-state (IBS) information.
+IBS is a term used to describe two identical alleles or two identical segments or sequences of DNA. 
+IBS/IBD calculations are affected by linkage disequilibrium (LD) so it is recommended to remove highly correlated markers by a method called LD-pruning.
+Therefore, we create a list of independent SNPs with plink.
+
+## PLINK
+plink --bfile DB_A_v7 --indep-pairwise 200 50 0.25  --out DB_pruned
+
+Informs plink that we wish to perform pruning with a window size of 200 variants, sliding across the genome with a step size of 50 variants at a time, and filter out any SNPs with LD r2 higher than 0.25.
+Duplicated samples and monozygotic twins are expected to share 2 alleles at every locus so the proportion of IBD equals 1.
+For parent-offspring pairs IBD is 0.5 and this value halves for second degree (0.25), third-degree relatives (0.125), and so on. For a population based sample we suggest using a pi‐hat threshold of 0.2. 
+
+## PLINK
+plink --bfile DB_A_v7 --extract DB_pruned.prune.in --rel-cutoff 0.2 --out subject_rel
+plink --bfile DB_A_v7 --keep subject_rel.rel.id --make-bed --out DB_A_v8
+---
+
+# 8 - HARDY-WEINBERG EQUILIBRIUM: Excludes markers which deviate from Hardy–Weinberg equilibrium.
+Gross departures from HWE can be indicative of genotyping error.
+This is evaluated by calculating Hardy-Weinberg test statistics for each variant using a Fisher or chi-square test.
+However, departures from HWE may also be due to selection and therefore, in a case-control study this QC step is usually performed in controls.
+When phenotype information is included, plink will automatically perform the filtering in the controls.
+
+## PLINK
+plink --bfile DB_A_v8 --hwe 1e-5 --pheno pheno.txt --write-snplist  --make-bed --out DB_A_v9
+---
